@@ -18,6 +18,7 @@
 package org.apache.cassandra.service;
 
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
 import java.net.InetAddress;
@@ -29,6 +30,7 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
@@ -47,7 +49,9 @@ import com.codahale.metrics.SharedMetricRegistries;
 import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthCacheService;
 import org.apache.cassandra.auth.AuthenticatedUser;
+import org.apache.cassandra.concurrent.ExecutorFactory;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
+import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.JMXServerOptions;
@@ -69,6 +73,7 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.StartupException;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.io.util.FileWriter;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Locator;
 import org.apache.cassandra.tcm.CMSOperations;
@@ -87,6 +92,7 @@ import org.apache.cassandra.service.snapshot.SnapshotManager;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.MultiStepOperation;
+import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JMXServerUtils;
 import org.apache.cassandra.utils.JVMStabilityInspector;
@@ -120,6 +126,14 @@ import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_METRICS;
  */
 public class CassandraDaemon
 {
+    private static ScheduledExecutorPlus inFlightRecorder;
+
+    // Use a thread-safe list to store the recordings
+    private static final List<Long> inFlightRecordings = new CopyOnWriteArrayList<>();
+
+    // Define your recording interval (e.g., every 5 seconds)
+    private static final long RECORD_INTERVAL_SECONDS = 5;
+
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=NativeAccess";
     public static boolean SKIP_GC_INSPECTOR = CassandraRelevantProperties.SKIP_GC_INSPECTOR.getBoolean();
 
@@ -428,6 +442,29 @@ public class CassandraDaemon
 
         PaxosState.startAutoRepairs();
         completeSetup();
+
+        // Add in-flight messages recorder
+        inFlightRecorder = ExecutorFactory.Global.executorFactory().scheduled("InFlightRecorder");
+        Runnable recordTask = () ->
+        {
+            try
+            {
+                // Get the value from the counter we "made" in StorageProxy
+                long currentInFlight = StorageProxy.inFlightReplications.getCount();
+//                long currentInFlight = 1;
+//                logger.info("logging in-flight number " + currentInFlight);
+                // Store it in our thread-safe list
+                inFlightRecordings.add(currentInFlight);
+            }
+            catch (Exception e)
+            {
+                System.err.println("Failed to record in-flight metric: " + e.getMessage());
+            }
+        };
+        inFlightRecorder.scheduleAtFixedRate(recordTask,
+                                             RECORD_INTERVAL_SECONDS,
+                                             RECORD_INTERVAL_SECONDS,
+                                             TimeUnit.SECONDS);
     }
 
     public void runStartupChecks()
@@ -711,6 +748,53 @@ public class CassandraDaemon
             {
                 logger.error("Error shutting down local JMX server: ", e);
             }
+        }
+
+        writeInflightRecordToFile();
+    }
+
+    public void writeInflightRecordToFile()
+    {
+        // Stop the newly-added recorder
+        if (inFlightRecorder != null)
+        {
+            inFlightRecorder.shutdown();
+            try
+            {
+                // Wait 5 seconds for any in-progress task to finish
+                inFlightRecorder.awaitTermination(5, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException e)
+            {
+                System.err.println("In-flight recorder shutdown interrupted.");
+                Thread.currentThread().interrupt();
+            }
+        }
+        logger.info("inflight recorder shut down.");
+
+        if (!inFlightRecordings.isEmpty())
+        {
+            try
+            {
+                // Make sure your log directory exists
+                long timestamp = Clock.Global.currentTimeMillis();
+                File logFile = new File("inflight_replications-" + timestamp + ".log");
+                PrintWriter writer = new PrintWriter(new FileWriter(logFile));
+                logger.info(String.valueOf(inFlightRecordings.size()));
+                for (long val : inFlightRecordings)
+                {
+                    writer.println(val);
+                }
+                writer.flush();
+                writer.close();
+                logger.info("In-flight recordings saved");
+            }
+            catch (IOException e)
+            {
+                throw new RuntimeException(e);
+            }
+        } else {
+            logger.info("no records");
         }
     }
 

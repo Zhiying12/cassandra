@@ -54,6 +54,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.primitives.Txn;
+import com.codahale.metrics.Counter;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.DebuggableTask.RunnableDebuggableTask;
@@ -193,6 +194,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.db.ConsistencyLevel.SERIAL;
 import static org.apache.cassandra.db.partitions.PartitionIterators.singletonIterator;
+import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.casReadMetrics;
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.casWriteMetrics;
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.readMetrics;
@@ -200,6 +202,7 @@ import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.readMetri
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.viewWriteMetrics;
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.writeMetrics;
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.writeMetricsForLevel;
+import static org.apache.cassandra.metrics.DefaultNameFactory.createMetricName;
 import static org.apache.cassandra.net.Message.out;
 import static org.apache.cassandra.net.NoPayload.noPayload;
 import static org.apache.cassandra.net.Verb.BATCH_STORE_REQ;
@@ -237,6 +240,10 @@ import static org.apache.commons.lang3.StringUtils.join;
 
 public class StorageProxy implements StorageProxyMBean
 {
+    public static final Counter inFlightReplications = Metrics.counter(createMetricName("ClientRequest",
+                                                                                        "StorageProxy",
+                                                                                        "InFlightReplications"));
+
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=StorageProxy";
     private static final Logger logger = LoggerFactory.getLogger(StorageProxy.class);
 
@@ -969,6 +976,8 @@ public class StorageProxy implements StorageProxyMBean
     public static void mutate(List<? extends IMutation> mutations, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
     throws UnavailableException, OverloadedException, WriteTimeoutException, WriteFailureException
     {
+        inFlightReplications.inc();
+
         Tracing.trace("Determining replicas for mutation");
         final String localDataCenter = DatabaseDescriptor.getLocator().local().datacenter;
 
@@ -995,10 +1004,14 @@ public class StorageProxy implements StorageProxyMBean
 
             // wait for writes.  throws TimeoutException if necessary
             for (AbstractWriteResponseHandler<IMutation> responseHandler : responseHandlers)
+            {
                 responseHandler.get();
+            }
+            inFlightReplications.dec();
         }
         catch (WriteTimeoutException|WriteFailureException ex)
         {
+            inFlightReplications.dec();
             if (consistencyLevel == ConsistencyLevel.ANY)
             {
                 hintMutations(mutations);
