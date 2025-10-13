@@ -128,9 +128,11 @@ import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_METRICS;
 public class CassandraDaemon
 {
     private static ScheduledExecutorPlus inFlightRecorder;
+    private static ScheduledExecutorPlus paxosRecorder;
 
     // Use a thread-safe list to store the recordings
     private static final List<Long> inFlightRecordings = new CopyOnWriteArrayList<>();
+    private static final List<Long> paxosRecordings = new CopyOnWriteArrayList<>();
 
     // Define your recording interval (e.g., every 5 seconds)
     private static final long RECORD_INTERVAL_SECONDS = 100;
@@ -452,7 +454,6 @@ public class CassandraDaemon
             {
                 // Get the value from the counter we "made" in StorageProxy
                 long currentInFlight = StorageProxy.inFlightReplications.getCount();
-//                long currentInFlight = 1;
 //                logger.info("logging in-flight number " + currentInFlight);
                 // Store it in our thread-safe list
                 inFlightRecordings.add(currentInFlight);
@@ -466,6 +467,17 @@ public class CassandraDaemon
                                              RECORD_INTERVAL_SECONDS,
                                              RECORD_INTERVAL_SECONDS,
                                              TimeUnit.MILLISECONDS);
+
+        paxosRecorder = ExecutorFactory.Global.executorFactory().scheduled("PaxosRecorder");
+        paxosRecorder.scheduleAtFixedRate(() -> {
+            try {
+                int size = PaxosState.ACTIVE.size();
+                logger.info("Paxos ACTIVE map size: {}", size);
+                paxosRecordings.add((long) size);
+            } catch (Exception e ) {
+                System.err.println("Failed to record in-flight metric: " + e.getMessage());
+            }
+        }, RECORD_INTERVAL_SECONDS, RECORD_INTERVAL_SECONDS, TimeUnit.MILLISECONDS);
     }
 
     public void runStartupChecks()
@@ -751,19 +763,24 @@ public class CassandraDaemon
             }
         }
 
-        writeInflightRecordToFile();
+        writeRecordToFile();
     }
 
-    public void writeInflightRecordToFile()
+    public void writeRecordToFile() {
+        writeInflightRecordToFile(inFlightRecorder, inFlightRecordings, "inflight-");
+        writeInflightRecordToFile(paxosRecorder, paxosRecordings, "paxos-");
+    }
+
+    public void writeInflightRecordToFile(ScheduledExecutorPlus recorder, List<Long> recordings, String filename)
     {
         // Stop the newly-added recorder
-        if (inFlightRecorder != null)
+        if (recorder != null)
         {
-            inFlightRecorder.shutdown();
+            recorder.shutdown();
             try
             {
                 // Wait 5 seconds for any in-progress task to finish
-                inFlightRecorder.awaitTermination(5, TimeUnit.SECONDS);
+                recorder.awaitTermination(5, TimeUnit.SECONDS);
             }
             catch (InterruptedException e)
             {
@@ -774,16 +791,16 @@ public class CassandraDaemon
         logger.info("inflight recorder shut down.");
         StorageProxy.outputWriteMetricsForLevel(ConsistencyLevel.ALL);
 
-        if (!inFlightRecordings.isEmpty())
+        if (!recordings.isEmpty())
         {
             try
             {
                 // Make sure your log directory exists
                 long timestamp = Clock.Global.currentTimeMillis();
-                File logFile = new File("inflight_replications-" + timestamp + ".log");
+                File logFile = new File(filename + timestamp + ".log");
                 PrintWriter writer = new PrintWriter(new FileWriter(logFile));
-                logger.info(String.valueOf(inFlightRecordings.size()));
-                for (long val : inFlightRecordings)
+                logger.info(String.valueOf(recordings.size()));
+                for (long val : recordings)
                 {
                     writer.println(val);
                 }
