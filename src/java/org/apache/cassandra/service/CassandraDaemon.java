@@ -133,6 +133,7 @@ public class CassandraDaemon
     // Use a thread-safe list to store the recordings
     private static final List<Long> inFlightRecordings = new CopyOnWriteArrayList<>();
     private static final List<Long> paxosRecordings = new CopyOnWriteArrayList<>();
+    private static final List<Long> paxosCustomizedRecordings = new CopyOnWriteArrayList<>();
 
     // Define your recording interval (e.g., every 5 seconds)
     private static final long RECORD_INTERVAL_SECONDS = 100;
@@ -457,6 +458,8 @@ public class CassandraDaemon
 //                logger.info("logging in-flight number " + currentInFlight);
                 // Store it in our thread-safe list
                 inFlightRecordings.add(currentInFlight);
+                paxosRecordings.add((long)PaxosState.ACTIVE.size());
+                paxosCustomizedRecordings.add(StorageProxy.paxosCasCounter.getCount());
             }
             catch (Exception e)
             {
@@ -468,16 +471,6 @@ public class CassandraDaemon
                                              RECORD_INTERVAL_SECONDS,
                                              TimeUnit.MILLISECONDS);
 
-        paxosRecorder = ExecutorFactory.Global.executorFactory().scheduled("PaxosRecorder");
-        paxosRecorder.scheduleAtFixedRate(() -> {
-            try {
-                int size = PaxosState.ACTIVE.size();
-                logger.info("Paxos ACTIVE map size: {}", size);
-                paxosRecordings.add((long) size);
-            } catch (Exception e ) {
-                System.err.println("Failed to record in-flight metric: " + e.getMessage());
-            }
-        }, RECORD_INTERVAL_SECONDS, RECORD_INTERVAL_SECONDS, TimeUnit.MILLISECONDS);
     }
 
     public void runStartupChecks()
@@ -768,7 +761,8 @@ public class CassandraDaemon
 
     public void writeRecordToFile() {
         writeInflightRecordToFile(inFlightRecorder, inFlightRecordings, "inflight-");
-        writeInflightRecordToFile(paxosRecorder, paxosRecordings, "paxos-");
+        writeInflightRecordToFile(inFlightRecorder, paxosRecordings, "paxos-");
+        writeInflightRecordToFile(inFlightRecorder, paxosCustomizedRecordings, "paxos-cas-");
     }
 
     public void writeInflightRecordToFile(ScheduledExecutorPlus recorder, List<Long> recordings, String filename)

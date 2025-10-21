@@ -249,6 +249,9 @@ public class StorageProxy implements StorageProxyMBean
     public static final Counter inFlightReplications = Metrics.counter(createMetricName("ClientRequest",
                                                                                         "StorageProxy",
                                                                                         "InFlightReplications"));
+    public static final Counter paxosCasCounter = Metrics.counter(createMetricName("ClientRequest",
+                                                                                   "StorageProxy",
+                                                                                   "PaxosCasReplications"));
 
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=StorageProxy";
     private static final Logger logger = LoggerFactory.getLogger(StorageProxy.class);
@@ -388,6 +391,7 @@ public class StorageProxy implements StorageProxyMBean
                                                             key, keyspaceName, cfName));
         }
 
+        paxosCasCounter.inc();
         ConsensusAttemptResult lastAttemptResult = null;
         do
         {
@@ -433,6 +437,7 @@ public class StorageProxy implements StorageProxyMBean
                     throw new IllegalStateException("Unsupported consensus " + decision);
             }
         } while (lastAttemptResult.shouldRetryOnNewConsensusProtocol);
+        paxosCasCounter.dec();
         return lastAttemptResult.casResult;
     }
 
