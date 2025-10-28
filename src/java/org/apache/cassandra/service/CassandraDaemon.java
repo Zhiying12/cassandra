@@ -57,6 +57,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.JMXServerOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SizeEstimatesRecorder;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -132,7 +133,7 @@ public class CassandraDaemon
     private static final List<Long> inFlightRecordings = new CopyOnWriteArrayList<>();
 
     // Define your recording interval (e.g., every 5 seconds)
-    private static final long RECORD_INTERVAL_SECONDS = 5;
+    private static final long RECORD_INTERVAL_SECONDS = 100;
 
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=NativeAccess";
     public static boolean SKIP_GC_INSPECTOR = CassandraRelevantProperties.SKIP_GC_INSPECTOR.getBoolean();
@@ -464,7 +465,7 @@ public class CassandraDaemon
         inFlightRecorder.scheduleAtFixedRate(recordTask,
                                              RECORD_INTERVAL_SECONDS,
                                              RECORD_INTERVAL_SECONDS,
-                                             TimeUnit.SECONDS);
+                                             TimeUnit.MILLISECONDS);
     }
 
     public void runStartupChecks()
@@ -771,6 +772,7 @@ public class CassandraDaemon
             }
         }
         logger.info("inflight recorder shut down.");
+        StorageProxy.outputWriteMetricsForLevel(ConsistencyLevel.ALL);
 
         if (!inFlightRecordings.isEmpty())
         {

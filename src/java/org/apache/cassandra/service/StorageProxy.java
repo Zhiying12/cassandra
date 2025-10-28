@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.service;
 
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -55,6 +57,7 @@ import org.slf4j.LoggerFactory;
 
 import accord.primitives.Txn;
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.Snapshot;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.DebuggableTask.RunnableDebuggableTask;
@@ -111,6 +114,8 @@ import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.hints.Hint;
 import org.apache.cassandra.hints.HintsService;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileWriter;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.DynamicEndpointSnitch;
 import org.apache.cassandra.locator.EndpointsForToken;
@@ -122,6 +127,7 @@ import org.apache.cassandra.locator.ReplicaPlans;
 import org.apache.cassandra.locator.Replicas;
 import org.apache.cassandra.metrics.CASClientRequestMetrics;
 import org.apache.cassandra.metrics.ClientRequestSizeMetrics;
+import org.apache.cassandra.metrics.ClientWriteRequestMetrics;
 import org.apache.cassandra.metrics.DenylistMetrics;
 import org.apache.cassandra.metrics.ReadRepairMetrics;
 import org.apache.cassandra.metrics.StorageMetrics;
@@ -1007,11 +1013,9 @@ public class StorageProxy implements StorageProxyMBean
             {
                 responseHandler.get();
             }
-            inFlightReplications.dec();
         }
         catch (WriteTimeoutException|WriteFailureException ex)
         {
-            inFlightReplications.dec();
             if (consistencyLevel == ConsistencyLevel.ANY)
             {
                 hintMutations(mutations);
@@ -1057,7 +1061,31 @@ public class StorageProxy implements StorageProxyMBean
             long latency = nanoTime() - requestTime.startedAtNanos();
             writeMetrics.addNano(latency);
             writeMetricsForLevel(consistencyLevel).addNano(latency);
+            inFlightReplications.dec();
             updateCoordinatorWriteLatencyTableMetric(mutations, latency);
+        }
+    }
+
+    public static void outputWriteMetricsForLevel(ConsistencyLevel level) {
+        ClientWriteRequestMetrics writeMetrics = writeMetricsForLevel(level);
+        Snapshot snapshot = writeMetrics.latency.getSnapshot();
+        long timestamp = Clock.Global.currentTimeMillis();
+        try
+        {
+            File logFile = new File("in-queue-latency-" + timestamp + ".log");
+            PrintWriter writer = new PrintWriter(new FileWriter(logFile));
+            writer.printf("0 %d\n", snapshot.getMin());
+            for (double i = 0.01; i < 1.00; i+=0.01) {
+                writer.printf("%f %f\n", i, snapshot.getValue(i));
+            }
+            writer.printf("100 %d\n", snapshot.getMax());
+            writer.flush();
+            writer.close();
+            logger.info("In-queue latencies saved");
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
         }
     }
 
