@@ -35,6 +35,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -249,6 +250,8 @@ public class StorageProxy implements StorageProxyMBean
     public static final Counter inFlightReplications = Metrics.counter(createMetricName("ClientRequest",
                                                                                         "StorageProxy",
                                                                                         "InFlightReplications"));
+
+    public static final ConcurrentLinkedQueue<Long> inQueueTime = new ConcurrentLinkedQueue<>();
 
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=StorageProxy";
     private static final Logger logger = LoggerFactory.getLogger(StorageProxy.class);
@@ -1062,6 +1065,7 @@ public class StorageProxy implements StorageProxyMBean
             writeMetrics.addNano(latency);
             writeMetricsForLevel(consistencyLevel).addNano(latency);
             inFlightReplications.dec();
+            inQueueTime.add(latency);
             updateCoordinatorWriteLatencyTableMetric(mutations, latency);
         }
     }
@@ -1072,7 +1076,7 @@ public class StorageProxy implements StorageProxyMBean
         long timestamp = Clock.Global.currentTimeMillis();
         try
         {
-            File logFile = new File("in-queue-latency-" + timestamp + ".log");
+            File logFile = new File("latency-cdf-" + timestamp + ".dat");
             PrintWriter writer = new PrintWriter(new FileWriter(logFile));
             writer.printf("0 %d\n", snapshot.getMin());
             for (double i = 0.01; i < 1.00; i+=0.01) {
@@ -1081,6 +1085,15 @@ public class StorageProxy implements StorageProxyMBean
             writer.printf("100 %d\n", snapshot.getMax());
             writer.flush();
             writer.close();
+            logger.info("Latency CDF saved");
+
+            File timeFile = new File("queue-latency-" + timestamp + ".dat");
+            PrintWriter writer1 = new PrintWriter(new FileWriter(timeFile));
+            for (long latency : inQueueTime) {
+                writer1.println(latency);
+            }
+            writer1.flush();
+            writer1.close();
             logger.info("In-queue latencies saved");
         }
         catch (IOException e)
